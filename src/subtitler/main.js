@@ -1,18 +1,94 @@
 import App from './App.svelte';
 
-const mount = document.createElement('div');
+
 if (location.host.includes('crunchyroll')) {
 	//crunchyroll fullscreens the player container, not the entire document,
-	//need to put the subtitler in there or it won't be visible when fullscreened
-	document.getElementById('vilosRoot').appendChild(mount);
+	//need to put the subtitler in there or it won't be visible when fullscreened	
+	const vilosRoot = document.getElementById('vilosRoot');
+	mountApp(vilosRoot);
+}
+else if (location.host.includes('mega')) {
+	waitForKeyElements("div.viewer-image-bl", mountApp);
 }
 else {
-	document.body.appendChild(mount);
+	const body = document.body;
+	mountApp(body);
 }
-mount.id = 'sheodox-jimaku-player';
-mount.style.position = 'fixed';
-mount.style.width = '100%';
 
-const app = new App({
-	target: mount
-});
+
+function mountApp (target) {
+	const mount = document.createElement('div');
+
+	target.appendChild(mount);
+
+	mount.id = 'sheodox-jimaku-player';
+	mount.style.position = 'fixed';
+	mount.style.width = '100%';
+	if (target.className === "viewer-image-bl") {
+		mount.style.zIndex = '9999';
+	}
+
+	const app = new App({
+		target: mount
+	});
+}
+
+
+/**
+ * A utility function for userscripts that detects and handles AJAXed content.
+ *
+ * Usage example:
+ *
+ *     function callback(domElement) {
+ *         domElement.innerHTML = "This text inserted by waitForKeyElements().";
+ *     }
+ * 
+ *     waitForKeyElements("div.comments", callback);
+ *     // or
+ *     waitForKeyElements(selectorFunction, callback);
+ *
+ * @param {(string|function)} selectorOrFunction - The selector string or function.
+ * @param {function} callback - The callback function; takes a single DOM element as parameter.
+ *                              If returns true, element will be processed again on subsequent iterations.
+ * @param {boolean} [waitOnce=true] - Whether to stop after the first elements are found.
+ * @param {number} [interval=300] - The time (ms) to wait between iterations.
+ * @param {number} [maxIntervals=-1] - The max number of intervals to run (negative number for unlimited).
+ */
+function waitForKeyElements(selectorOrFunction, callback, waitOnce, interval, maxIntervals) {
+	if (typeof waitOnce === "undefined") {
+		waitOnce = true;
+	}
+	if (typeof interval === "undefined") {
+		interval = 300;
+	}
+	if (typeof maxIntervals === "undefined") {
+		maxIntervals = -1;
+	}
+	var targetNodes = (typeof selectorOrFunction === "function")
+			? selectorOrFunction()
+			: document.querySelectorAll(selectorOrFunction);
+
+	var targetsFound = targetNodes && targetNodes.length > 0;
+	if (targetsFound) {
+		targetNodes.forEach(function(targetNode) {
+			var attrAlreadyFound = "data-userscript-alreadyFound";
+			var alreadyFound = targetNode.getAttribute(attrAlreadyFound) || false;
+			if (!alreadyFound) {
+				var cancelFound = callback(targetNode);
+				if (cancelFound) {
+					targetsFound = false;
+				}
+				else {
+					targetNode.setAttribute(attrAlreadyFound, true);
+				}
+			}
+		});
+	}
+
+	if (maxIntervals !== 0 && !(targetsFound && waitOnce)) {
+		maxIntervals -= 1;
+		setTimeout(function() {
+			waitForKeyElements(selectorOrFunction, callback, waitOnce, interval, maxIntervals);
+		}, interval);
+	}
+}

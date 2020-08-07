@@ -22,9 +22,14 @@ const userscript = `// ==UserScript==
 // @author       sheodox
 // @match        https://static.vrv.co/vilos/player.html*
 // @match        https://static.crunchyroll.com/vilos-v2/web/vilos/player.html*
+// @match        https://mega.nz/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_addStyle
 // ==/UserScript==
+
+GM_addStyle('.viewer-image-bl {width: 100%;height: 100%;font-size: initial!important;line-height: initial!important;margin: auto;}');
+GM_addStyle('input[type="checkbox"] {opacity: initial!important;}');
 
 ${script}
 `;
