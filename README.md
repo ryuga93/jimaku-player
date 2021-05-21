@@ -1,3 +1,12 @@
+# 字幕プレーヤー: Mega
+
+This is a fork of  [字幕プレーヤー](https://github.com/sheodox/jimaku-player/) that adds support to Mega.
+
+[Install (requires Tampermonkey)](https://github.com/ryuga93/jimaku-player-mega/raw/master/dist/jimaku-player.user.js)
+
+##Added feature
+Allows subtitles to be loaded into Mega's video player.
+
 # <img src="https://raw.githubusercontent.com/sheodox/jimaku-player/master/static/logo.svg?sanitize=true" width="160" height="160" alt="logo"> 字幕プレーヤー
 
 This is a [Tampermonkey](https://www.tampermonkey.net/) userscript that lets you provide your own subtitles to play over anime on
