@@ -5,69 +5,63 @@
 		flex-wrap: wrap;
 		justify-content: center;
 	}
-    .history ul {
-		list-style: none;
-		display: flex;
-		justify-content: center;
-	}
-	.history li {
-		display: inline-block;
-	}
-    .history li:not(:last-child)::after {
-		content: '→';
-		color: #4b5266;
-		padding: 0.2rem;
-	}
 	.history li:last-child a {
 		color: white;
 		cursor: default;
-		text-decoration: none;
+		text-decoration: none !important;
+		border-color: transparent !important;
 	}
-	.history a {
-		color: var(--accent-color);
+	.history a:last-of-type {
 		font-size: 1.1rem;
+	}
+    #video-list {
+		/* don't want folders without videos to take up so little space that the page
+		gets really short and they have to scroll immediately to see any videos */
+		min-height: 30rem;
 	}
 </style>
 
 <div id="video-list">
 	<nav class="history">
-        <ul>
-			{#each videoInfo.history as path}
+        <ol class="f-row justify-content-center">
+			{#each $videoInfo.history as path, index}
 				<li>
 					<a href={path.src} on:click|preventDefault={() => selectPath(path)}>{path.name}</a>
+					{#if index !== $videoInfo.history.length - 1}
+						<Icon icon="chevron-right" />
+					{/if}
 				</li>
 			{/each}
-		</ul>
+		</ol>
 	</nav>
 	<div class="directories grid-list">
-		{#each videoInfo.directories as dir (dir.src)}
-			<a class="icon-button" href={getRouteToItem(dir)} on:click|preventDefault={() => selectPath(dir)}><Icon name="folder" /> {dir.name}</a>
+		{#each $videoInfo.directories as directory (directory.src)}
+            <SelectorDirectory {directory} />
 		{/each}
 	</div>
     <div class="videos grid-list">
-		{#each videoInfo.videos as video (video.src)}
+		{#each $videoInfo.videos as video (video.src)}
 			<SelectorVideo isSelected={selectedVideoInfo.src === video.src} route={getRouteToItem(video)} video={video} on:selected={e => selectVideo(e.detail)} />
 		{/each}
 	</div>
 </div>
 <script>
 	import page from 'page';
-	import Icon from '../Icon.svelte';
+	import {Icon} from 'sheodox-ui';
 	import SelectorVideo from "./SelectorVideo.svelte";
+	import {videoInfo} from "../videos-store";
+	import {selectedGhost} from "./thumbnail-ghosts";
+	import SelectorDirectory from "./SelectorDirectory.svelte";
+	import {getRouteToItem, selectPath} from "./selector-utils";
 
-	export let videoInfo = {videos: [], directories: [], history: []};
 	export let selectedVideoInfo = {src: ''};
+
+	$: selectedGhost.set({
+		imageKey: selectedVideoInfo.imageKey,
+	})
 
 	function selectVideo(item) {
 		selectPath(item);
 		window.scrollTo(0, 0);
-	}
-
-	function getRouteToItem(item) {
-		return `/v/${encodeURIComponent(item.src)}`
-	}
-
-	function selectPath(item) {
-		page(getRouteToItem(item));
 	}
 </script>

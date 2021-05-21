@@ -1,9 +1,12 @@
-import {readable} from "svelte/store";
+import {readable, writable} from "svelte/store";
+import {currentTime} from "./activity-stores";
 
 let subs;
 export const setSubtitles = subtitleObject => {
 	subs = subtitleObject;
 }
+
+export const subtitleTime = writable(0);
 
 /**
  * Create a readable store for subtitles that should show over the video on the page given the specified offset.
@@ -12,7 +15,7 @@ export const setSubtitles = subtitleObject => {
  */
 export const createSubtitleTimer = offsetOrStore => readable([], set => {
 	let offset = typeof offsetOrStore === 'number' ? offsetOrStore : 0,
-		af, offsetUnsubscribe;
+		offsetUnsubscribe;
 
 	//allow a store to be passed, for variable times (the main player itself)
 	//without having to re-create this subtitleTimer given alignment changes
@@ -21,15 +24,15 @@ export const createSubtitleTimer = offsetOrStore => readable([], set => {
 			offset = alignment;
 		})
 	}
-	const video = document.querySelector('video'),
-		update = () => {
-			set(subs.getSubs(video.currentTime * 1000 - offset))
-			af = requestAnimationFrame(update);
-		};
 
-	update();
+	const unsubCurrentTime = currentTime.subscribe(currentTime => {
+		const time = currentTime * 1000 - offset
+		subtitleTime.set(time);
+		set(subs.getSubs(time))
+	})
+
 	return () => {
-		cancelAnimationFrame(af);
+		unsubCurrentTime();
 		if (offsetUnsubscribe) {
 			offsetUnsubscribe();
 		}

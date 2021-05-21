@@ -1,58 +1,9 @@
 <style>
 	.subtitles-app {
 		position: relative;
-		font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-		text-align: center;
 	}
 	.subtitles-app > :global(*) {
 		z-index: 1000000000;
-	}
-	.subtitles-app :global(button), .subtitles-app :global(.button) {
-		background: #fd0;
-		border: none;
-		padding: 10px;
-		line-height: 1;
-		font-weight: bold;
-		color: black;
-		text-transform: uppercase;
-		font-size: 0.9rem;
-		margin-bottom: 0.2rem;
-	}
-	.subtitles-app :global(.small-button) {
-		font-size: 0.6rem;
-	}
-	.subtitles-app :global(button:disabled), .subtitles-app :global(.button:disabled) {
-		background: #2a3450;
-	}
-	.subtitles-app :global(button.secondary), .subtitles-app :global(.button.secondary) {
-		background: #11121863;
-		border: 1px solid #fd0;
-		color: #fd0;
-	}
-	.subtitles-app :global(button:not(:disabled):hover), .subtitles-app :global(.button:not(:disabled):hover) {
-		background: #ffea6d;
-		cursor: pointer;
-        color: black;
-	}
-
-	.subtitles-app :global(input[type=text]), .subtitles-app :global(input:not([type])) {
-		color: white;
-		background: #0b0b26;
-		border: 1px solid #364962;
-		padding: 0.2rem;
-	}
-	.subtitles-app :global(input[type=text]):focus, .subtitles-app :global(input:not([type])):focus {
-		border-color: #fd0;
-	}
-
-    /* screenreader only text elements */
-    .subtitles-app :global(.sr) {
-		position:absolute;
-		left:-10000px;
-		top:auto;
-		width:1px;
-		height:1px;
-		overflow:hidden;
 	}
 </style>
 <div class="subtitles-app">
@@ -61,19 +12,26 @@
 	{:else if phase === 'align'}
 		<Align subtitles={subtitles} on:done={aligned} on:reselect={() => phase = 'prompt'}/>
 	{:else if phase === 'play'}
-		<Subtitles
-				format={subtitles.format}
-				styles={subtitles.styles}
-				current={$subtitleStore}
-				on:define-pauser={definePauser}
-		/>
+		{#if $showSubtitlesOnVideo}
+			{#if subtitles.format === 'subrip'}
+				<SubRipRenderer
+					format={subtitles.format}
+					subtitles={subtitleStore}
+				/>
+			{:else if subtitles.format === 'ass'}
+				<ASSRenderer
+					format={subtitles.format}
+					styles={subtitles.styles}
+					subtitles={subtitleStore}
+				/>
+			{/if}
+		{/if}
 		<Tray
-				recentSubs={recentSubs}
-				subtitles={subtitles}
-				on:restart={restart}
-				on:tray-pauser={trayPauser}
-				on:define-pauser={definePauser}
-				on:realign={() => phase = 'align'}
+			{recentSubs}
+			{subtitles}
+			on:restart={restart}
+			on:tray-pauser={trayPauser}
+			on:realign={() => phase = 'align'}
 		/>
 	{:else if phase === 'cancelled'}
         <Tray mode="cancelled"
@@ -82,21 +40,25 @@
 	{/if}
 </div>
 
+<Hotkeys />
+
 <script>
 	import {onMount} from 'svelte';
-	import Tray from "./Tray.svelte";
-	import Subtitles from "./Subtitles.svelte";
-	import VideoController from './VideoController';
+	import Tray from "./tray/Tray.svelte";
+	import SubRipRenderer from './renderers/SubRipRenderer.svelte';
+	import ASSRenderer from './renderers/ASSRenderer.svelte';
 	import SubtitlePrompt from "./SubtitlePrompt.svelte";
 	import Align from "./Align.svelte";
+	import {showSubtitlesOnVideo, autoCopySubtitles} from "./settingsStore";
 	import {
 		showNameStore,
 		alignmentStore
 	} from './alignmentStore';
 	import {createSubtitleTimer, setSubtitles as setTimerSubtitles} from "./subtitleTimer";
+	import Hotkeys from "./Hotkeys.svelte";
+	import {videoController} from "./VideoController";
 
-	const alignmentKey = 'last-used-alignment',
-		videoController = new VideoController();
+	const alignmentKey = 'last-used-alignment';
 
 	let phase = 'prompt',
 		currentSubtitles = [],
@@ -156,8 +118,15 @@
 
 		setTimerSubtitles(subtitles);
 		subtitleStore = createSubtitleTimer(alignmentStore)
+		let lastText = '';
 		subtitleUnsubscribe = subtitleStore.subscribe(currentSubs => {
 			mergeSubsWithRecent(currentSubs);
+
+			const subText = currentSubs.map(sub => sub.text || '').join('\n').trim();
+			if ($autoCopySubtitles && subText !== lastText && subText) {
+				lastText = subText;
+				GM_setClipboard(subText, 'text')
+			}
 		})
 	}
 
@@ -172,29 +141,23 @@
 		}
 	}
 
-	function renderSubs() {
-		if (phase === 'play') {
-			currentSubtitles = subtitles.getSubs(video.currentTime * 1000 - subOffset);
-			requestAnimationFrame(renderSubs);
-		}
-	}
-
 	function subtitlesLoaded(e) {
-		subtitles = e.detail;
+		subtitles = e.detail.subtitles;
 		if (subtitles.subs.length === 0) {
 			console.log('subtitles object failed to parse: ', subtitles);
 			alert(`No subtitles were able to be parsed from the selected subtitle file, verify nothing is wrong with the file. If it appears normal please submit a bug report with the episode and the subtitles file you used to the issue tracker (a link can be found in the tray on the right side of the video player)!`);
 			phase = 'cancelled';
-		} else {
+		}
+		else if (!e.detail.skipAlignment) {
 			phase = 'align';
+		}
+		else {
+			alignmentStore.set(0);
+			aligned();
 		}
 	}
 
 	function trayPauser(e) {
 		e.detail ? videoController.addPauser('tray') : videoController.removePauser('tray');
-	}
-
-	function definePauser() {
-		videoController.addPauser('define');
 	}
 </script>

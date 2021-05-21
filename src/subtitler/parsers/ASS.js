@@ -1,4 +1,3 @@
-// import SubtitleFormat from "./SubtitleFormat";
 const SubtitleFormat = require('./SubtitleFormat');
 
 //parser for Advanced SubStation Alpha (.ass) subtitle files
@@ -8,76 +7,240 @@ const camelCase = string => {
 	return (string.charAt(0).toLowerCase() + string.substring(1)).replace(' ', '');
 };
 
+//the legacy alignment numbering system is kind of weird, 1-3 are the same,
+//but 5-7 are the top of the screen, then switching to 9-11 for the center.
+//but the locations they end up in are all the same, so this just maps
+//the legacy alignments to the regular alignment numbers so the renderer
+//can treat them both the same way
+const legacyAlignmentTranslationMapping = {
+	1: 1,
+	2: 2,
+	3: 3,
+	5: 7,
+	6: 8,
+	7: 9,
+	9: 4,
+	10: 5,
+	11: 6
+};
+
+const svgNamespace = 'http://www.w3.org/2000/svg';
+function createSVGNSElement(elementName) {
+	return document.createElementNS(svgNamespace, elementName);
+}
+function createSVG() {
+	const svg = createSVGNSElement('svg');
+	svg.setAttribute('xmlns', svgNamespace);
+	return svg;
+}
+
+/**
+ * Translate a legacy \a override into its matching \an alignment value.
+ * @param alignment
+ * @returns {*}
+ */
+const parseLegacyAlignment = alignment => {
+	return legacyAlignmentTranslationMapping[alignment];
+}
+
+/**
+ * Parse an ASS hex color into an rgba color. Also returns a method to weaken the rgba's alpha
+ * if it needs to be used in a stacked fashion so it doesn't get overpoweringly opaque trying
+ * to imitate a large blur override on a outline.
+ * @param assColor
+ * @returns {{rgba: string, weakenAlpha: (function(*): string)}}
+ */
 const parseColor = assColor => {
 	if (assColor) {
-		assColor = assColor.replace(/[&H]/g, '');
+		assColor = assColor
+			.replace(/[&H]/g, '')
+			// before complex override parsing was more meticulous it was easy for it to stop at the
+			// first ) it saw and if it was on a nested complex override it'd stop processing early
+			// and lose its closing ). but it's better now so that shouldn't happen, but I have seen
+			// an override that had a ) hanging out when it shouldn't, this should trim bad characters
+			// in messy overrides that otherwise cause color parsing to fail. need to do this before padding
+			.replace(/[^0-9A-F]/g, '')
 		assColor = assColor.padStart(8, '0');
 		const [_, alpha, blue, green, red] = assColor.match(/([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})/i),
 			fromHex = num => parseInt(num, 16);
 		//alpha channel numbers are backwards from CSS hex colors, need to invert it
-		return `rgba(${fromHex(red)}, ${fromHex(green)}, ${fromHex(blue)}, ${255 - fromHex(alpha)})`
+		return {
+			rgba: `rgba(${fromHex(red)}, ${fromHex(green)}, ${fromHex(blue)}, ${((255 - fromHex(alpha)) / 255).toFixed(3)})`,
+			weakenAlpha: alphaStrength => {
+				return `rgba(${fromHex(red)}, ${fromHex(green)}, ${fromHex(blue)}, ${(alphaStrength * ((255 - fromHex(alpha)) / 255)).toFixed(3)})`
+			}
+		}
 	}
 };
 
+/**
+ * Parse a clip override's instructions into its scale and its drawing commands.
+ * @param clipOptions
+ * @returns {{scale: *, commands: *[]}}
+ */
+const parseClip = clipOptions => {
+	//clips have two types, rectangle and vector.
+	//rectangle clips have four parameters,
+	if (clipOptions.length === 4) {
+		//todo - rectangle clip
+	}
+	else {
+		//if only drawing commands are given the scale is assumed to be 1
+		const [scale, drawingCommands] = clipOptions.length === 1 ? [1, clipOptions[0]] : clipOptions,
+			commands = parseDrawingCommands(drawingCommands)
+
+		if (commands) {
+			return {
+				scale,
+				commands
+			}
+		}
+	}
+}
+
+/**
+ * Parse an ASS drawing command string into an array of objects of the individual
+ * path commands and their corresponding float parsed array of coordinates.
+ * @param drawText
+ * @returns {[]}
+ */
+const parseDrawingCommands = drawText => {
+	if (!drawText) {
+		return null;
+	}
+
+	const commands = [],
+		commandRegex = /([mnlbspc][ \.0-9\-]+)/g;
+
+	for (const commandText of drawText.match(commandRegex)) {
+		const [commandName, ...coordinates] = commandText.trim().split(' ');
+
+		//for each drawing command, get the command type (e.g. 'm' - move, 'l' - line, etc),
+		//and the sets of coordinates that come with it
+		commands.push({
+			command: commandName,
+			coordinates: coordinates.map(parseFloat)
+		});
+	}
+
+	//ASS coordinates are weird and allow you to use negative numbers, but that won't show in
+	//an SVG path, it'll be out of the boundaries of the SVG, just bump everything up to at least zero
+	const makePositiveAmount = -1 * commands.reduce((lowest, {coordinates}) => {
+		return Math.min(lowest, ...coordinates)
+	}, 0)
+
+	commands.forEach(command => {
+		command.coordinates = command.coordinates.map(c => c + makePositiveAmount);
+	});
+	return commands;
+};
+
+/**
+ * Translates a series of ASS drawing commands parsed by `parseDrawingCommands` to
+ * an SVG path string, along with some measurements about the drawing it contains,
+ * which are used to properly size the path when added to an SVG in some way.
+ * @param commands
+ * @returns {{path: string, viewBox: string, maxHeight: number, maxWidth: number}}
+ */
+const genPathFromDrawCommands = (commands) => {
+	let paths = [];
+	let maxWidth = 0, maxHeight = 0;
+	//for an accurate viewBox and SVG sizing we need to know how big the SVG is going to be
+	function analyzeMaxes(x, y) {
+		maxWidth = Math.max(maxWidth, x);
+		maxHeight = Math.max(maxHeight, y);
+	}
+
+	/**
+	 * ASS lets you omit redundant path commands and just give a huge list of coordinates for some
+	 * drawing commands, but that doesn't fly with SVGs. So in ASS you can do:
+	 * L 100 100 200 200 300 300 which will draw three lines to (100, 100), (200, 200), and (300,300)
+	 * but we need to separate that into three commands of two coordinates for SVGs,
+	 * this will group the specified commands into groups of commands, so the above
+	 * example will be turned into: L 100 100 L 200 200 L 300 300
+	 * given a maxCoordsPerCommand of 2. additionally a callback can be
+	 * given that will be passed each group of coordinates, so the caller can call
+	 * analyzeMaxes, as it'll have a better idea of which coordinates are x and which are y.
+	 * @param command - SVG path command code
+	 * @param coordinates - an array of coordinates
+	 * @param maxCoordsPerCommand - how many coordinates are valid after a command code
+	 * @param callbackPerSet - callback to have the caller analyze x/y values for computing maxHeight/maxWidth
+	 */
+	function pathInSets(command, coordinates, maxCoordsPerCommand, callbackPerSet) {
+		const commands = [],
+			//copy the coordinates array, otherwise we'll wipe out debug info
+			mutableCoordinates = coordinates.slice();
+		while (mutableCoordinates.length > 0) {
+			const set = mutableCoordinates.splice(0, maxCoordsPerCommand);
+			if (callbackPerSet) {
+				callbackPerSet(...set);
+			}
+			commands.push(command + ' ' + set.join(' '));
+		}
+		paths = paths.concat(commands);
+	}
+
+	for (let {command, coordinates} of commands) {
+		if (command === 'm' && paths.length > 0) {
+			paths.push(' Z '); //'z' closes the path which is what 'm' does in addition to moving
+		}
+
+		//if it's an 'n', it's a move command like an 'm', but without closing a path,
+		//so now that we're past the path closing condition, treat it as an 'm'
+		if (command === 'n') {
+			command = 'm';
+		}
+
+		if (command === 'l') {
+			//ass line commands can take multiple sets of coordinates, but svg paths need
+			//to be grouped in sets of two
+			pathInSets('L', coordinates, 2, analyzeMaxes);
+		}
+		else if (command === 'm') {
+			paths.push('M' + coordinates.join(' '));
+			analyzeMaxes(...coordinates);
+		}
+		else if (command === 'b') {
+			//in an svg path 'C' is a cubic bezier curve, which is 'b' in ASS
+			pathInSets('C', coordinates, 6, (x1, y1, x2, y2, x3, y3) => {
+				analyzeMaxes(x1, y1);
+				analyzeMaxes(x2, y2);
+				analyzeMaxes(x3, y3);
+			});
+		}
+	}
+
+	return {
+		path: paths.join(' '),
+		viewBox: `0 0 ${maxWidth} ${maxHeight}`,
+		maxHeight, maxWidth
+	};
+}
+
 const genOutlineStyles = (outlineColor, outlineWidth, shadowColor='transparent', shadowDepth=0, blur=0) => {
-	const color = outlineColor || shadowColor;
-	shadowDepth *= 2;
+	// many shadows will be stacked, which gives an multiplied shadow color, and the shadow will appear
+	// way too thick unless we significantly lower the alpha value on the color. the weakening effect
+	// is multiplied by 4 here because there are 4 directions of shadows we stack, and it looks best it seems
+	const colorSource = outlineColor || shadowColor,
+		color = blur < 1 ? colorSource.rgba : colorSource.weakenAlpha(1 / (4 * outlineWidth));
 	blur = `${blur}px`;
 
-	//make the outline a bit stronger, seems to need it when comparing to VLC's rendered subtitles
-	outlineWidth = (typeof outlineWidth === 'undefined' ? 1 : outlineWidth) * 2;
-	const outlines = [];
+	outlineWidth = (typeof outlineWidth === 'undefined' ? 1 : parseInt(outlineWidth, 10));
+	let outlines = [];
 	//make a ton of stacking shadows, because otherwise thicker outlines won't appear smooth
 	for (let i = -1 * outlineWidth; i <= outlineWidth; i++) {
 		for (let j = -1 * outlineWidth; j <= outlineWidth; j++) {
 			outlines.push(`${i}px ${j}px ${blur} ${color}`);
 		}
 	}
-	return `text-shadow: ${outlines.join(', ')}, ${shadowDepth}px ${shadowDepth}px ${blur} ${shadowColor}`
+	if (outlineWidth === 0) {
+		outlines = ['none'];
+	}
+	return `text-shadow: ${outlines.join(', ')}; filter: drop-shadow(${shadowDepth}px ${shadowDepth}px ${blur} ${shadowColor.rgba})`
 };
 
 const genFontFamily = fontName => {
 	return `font-family: "${fontName}", "Source Han Sans", "源ノ角ゴシック", "Hiragino Sans", "HiraKakuProN-W3", "Hiragino Kaku Gothic ProN W3", "Hiragino Kaku Gothic ProN", "ヒラギノ角ゴ ProN W3", "Noto Sans", "Noto Sans CJK JP", "メイリオ", Meiryo, "游ゴシック", YuGothic, "ＭＳ Ｐゴシック", "MS PGothic", "ＭＳ ゴシック", "MS Gothic", sans-serif`
-};
-
-const genAlignment = (alignmentCode, marginL='0vw', marginR='0vw', marginV='0vh') => {
-	//unless you're using the legacy \a alignment override, the alignments are like the 1-9 keys on the number pad,
-	//so for example 1=bottom left, 5=middle center, 9=top right, that point is its anchor, so the text needs to be
-	//translated to not go off screen or not be in a weird place. so alignment 9 should be translated so its as if
-	//the text grows down and to the left. likewise alignment 1 should be translated to grow upwards and to the right.
-	//
-	//additionally, the margins need to be taken into account to pull the text away from the edges of the screen,
-	//otherwise they'll go off the screen if we just use these positions and add a margin css rule
-	const positions = {
-			1: `top: calc(100vh - ${marginV}); left: ${marginL}; transform: translate(0, -100%)`,
-			2: `top: calc(100vh - ${marginV}); left: 50vw; transform: translate(-50%, -100%)`,
-			3: `top: calc(100vh - ${marginV}); left: calc(100vw - ${marginR}); transform: translate(-100%, -100%)`,
-			4: `top: 50vh; left: ${marginL}; transform: translate(0, -50%)`,
-			5: `top: 50vh; left: 50vw; transform: translate(-50%, -50%)`,
-			6: `top: 50vh; left: calc(100vw - ${marginR}); transform: translate(-100%, -50%)`,
-			//growth in the y direction is the natural way text grows on the web for the top alignments, only need an X correction
-			7: `top: ${marginV}; left: ${marginL}`,
-			8: `top: ${marginV}; left: 50vw; transform: translateX(-50%)`,
-			9: `top: ${marginV}; left: calc(100vw - ${marginR}); transform: translateX(-100%)`,
-		},
-		//to create alignments that can be inverted using the tray option, this is used to flip the alignment vertically
-		invertedAlignments = {
-			1: 7,
-			2: 8,
-			3: 9,
-			4: 4,
-			5: 5,
-			6: 6,
-			7: 1,
-			8: 2,
-			9: 3
-		},
-		genStyle = alignment => `position:fixed;${positions[alignment]}`;
-
-	return {
-		normal: genStyle(alignmentCode),
-		inverted: genStyle(invertedAlignments[alignmentCode])
-	}
 };
 
 /**
@@ -86,7 +249,7 @@ const genAlignment = (alignmentCode, marginL='0vw', marginR='0vw', marginV='0vh'
  * {\fs12}Some small text {\fs24}Some big text
  * Into:
  * yields: {\fs12}Some small text
- * yields: {\f24}Some big text
+ * yields: {\fs24}Some big text
  * @param subtitleText
  * @returns {Generator<*, void, ?>}
  */
@@ -97,20 +260,210 @@ function* overrideScanner(subtitleText) {
 	//don't skip text with no overrides at the start
 	const firstOverrideIndex = subtitleText.indexOf('{');
 	if (firstOverrideIndex > 0) {
-		yield subtitleText.substring(0, firstOverrideIndex);
+		yield {
+			text: subtitleText.substring(0, firstOverrideIndex),
+			overrides: {}
+		};
 	}
 
 	while ((next = nextOverriddenTextReg.exec(subtitleText)) !== null) {
-		yield next[1]
+		yield parseOverrides(next[1])
 	}
 }
 
+/**
+ * A list of override tags we parse (but not necessarily support),
+ * 'tag' is the ASS override tag, we'll map it to a more friendly
+ * property name when parsing overrides. 'complex' is a boolean
+ * determining if we should expect to see arguments (like,this)
+ * instead of just immediately after the override tag name.
+ *
+ * Multiple overrides can target the same 'friendly' name if they have the same effect.
+ *
+ * Since the parser is fairly dumb and doesn't know when an override tag ends and the value begins
+ * it's recommended that overrides are checked for in order from most specific name to least specific,
+ * i.e. look for a 'fscx' before a 'fs' override, if you didn't you might get a value of 'cx' instead of the
+ * font size you were expecting to get. If an override is found it's removed from the overrides yet to be
+ * processed for this phrase and won't be considered next time checkOverride is called (hence why you can look
+ * for 'fscx' then safely look for 'fs', 'fscx' won't be in the overrides anymore). The exception is complex
+ * tags, as we know a '(' immediately follows the override tag, so they can be first if needed (if their
+ * arguments are likely to contain more overrides like '\t' does, otherwise we'll match a general style
+ * instead of a part of an animation)
+ *
+ * Some tags (repeatable=true) can occur more than once in a list of overrides (\t), we need to capture every instance
+ * before trying to parse anything else, or we might get part of what's supposed to be a transition
+ * and interpret it as a regular override for the whole duration of the subtitle instead of just part.
+ *
+ * Some tags (parseTogether=true) might not have the same data type for all arguments (\clip)
+ * and using one parser for all values in a list of complex arguments would cause trouble.
+ */
+const intBase10 = numStr => parseInt(numStr, 10),
+	knownOverrides = [
+		{ tag: 't', friendly: 'animatedTransform', complex: true, repeatable: true },
+		{ tag: 'move', friendly: 'movement', complex: true, parser: parseFloat },
+		{ tag: 'clip', friendly: 'clip', complex: true, parser: parseClip, parseTogether: true },
+		{ tag: '3c', friendly: 'outlineColor', parser: parseColor },
+		{ tag: '4c', friendly: 'shadowColor', parser: parseColor },
+		{ tag: 'bord', friendly: 'outlineSize' },
+		{ tag: 'shad', friendly: 'shadowDepth' },
+		// 'blur' and 'be' overrides should use different blur methods,
+		// but it's just going to be the same text shadow anyway,
+		// so both will just write to the same 'blur' friendly property
+		{ tag: 'blur', friendly: 'blur' },
+		{ tag: 'be', friendly: 'blur' },
+		{ tag: 'pos', friendly: 'position', complex: true, parser: intBase10 },
+		{ tag: 'an', friendly: 'alignment' },
+		{ tag: 'org', friendly: 'origin', complex: true },
+		{ tag: 'fscx', friendly: 'fontScaleX' },
+		{ tag: 'fscy', friendly: 'fontScaleY' },
+		{ tag: 'frx', friendly: 'rotateX' },
+		{ tag: 'fry', friendly: 'rotateY' },
+		{ tag: 'frz', friendly: 'rotateZ' },
+		{ tag: 'fad', friendly: 'fade', complex: true, parser: intBase10 },
+		{ tag: 'fsp', friendly: 'letterSpacing' },
+		{ tag: 'fs', friendly: 'fontSize' },
+		{ tag: 'u', friendly: 'underline' },
+		{ tag: 's', friendly: 'strikethrough' },
+		{ tag: 'b', friendly: 'bold', parser: intBase10 },
+		{ tag: 'i', friendly: 'italic', parser: intBase10 },
+		{ tag: 'fn', friendly: 'fontName' },
+		{ tag: '1c', friendly: 'color', parser: parseColor },
+		// 'c' is an abbreviation for '1c' (primary fill color aka text color)
+		{ tag: 'c', friendly: 'color', parser: parseColor },
+		{ tag: 'r', friendly: 'reset', defaultValue: false},
+		{ tag: 'q', friendly: 'wrapStyle' },
+		{ tag: 'p', friendly: 'drawMode' },
+		{ tag: 'a', friendly: 'alignment', parser: parseLegacyAlignment },
+	];
+
+/**
+ * Some overrides need their values parsed, like colors and integers, if
+ * a parser exists for that override this will run it on every value
+ * @param value
+ * @param parser
+ * @param parseTogether - if the parser should be run on the whole value (true), or each (false, default)
+ * @returns {*}
+ */
+function runOverrideValueParser(value, parser, parseTogether=false) {
+	if (!parser) {
+		return value;
+	}
+
+	if (parseTogether) {
+		return parser(value);
+	}
+
+	return Array.isArray(value) ? value.map(parser) : parser(value);
+}
+/**
+ * Get an object of all overrides that can be found in the phrase
+ * @param overridesAndText - a string yielded from overrideScanner
+ */
+function parseOverrides(overridesAndText) {
+	const rawText = overridesAndText, //kept around for debugging
+		text = overridesAndText.replace(/{.*?}/g, ''),
+		friendlyOverrides = {}, // a map of friendly names to values we want to program to
+		rawOverrides = {}; // a map of the original ASS tag names to their values for debugging
+
+	//normally would want to safety check the match, but we know we have some if this
+	//function was called in the first place
+	let [overridesString] = overridesAndText.match(/{.*?}/);
+
+	for (const {tag, friendly, complex=false, defaultValue, parser, repeatable=false, parseTogether} of knownOverrides) {
+		let result = getOverride(overridesString, tag, complex)
+
+		let i = 0;
+			// for overrides which support only a single value, only check once,
+			// but for overrides that can repeat (\t) check until something is found
+		while ((!repeatable && i === 0) || (repeatable && result)) {
+			if (result) {
+				overridesString = result.overrides;
+
+				const parsedValue = runOverrideValueParser(result.params, parser, parseTogether) || defaultValue;
+				// only parse friendly overrides, the raw ones should stay as-is
+				friendlyOverrides[friendly] = !repeatable ? parsedValue :
+					//if it's a repeatable value (like \t that can occur more than once),
+					//we need to build an array of the times it's been called
+					[...(friendlyOverrides[friendly] || []), parsedValue];
+				rawOverrides[tag] = !repeatable ? result.params : [...(rawOverrides[tag] || []), result.params];
+			}
+
+			result = getOverride(overridesString, tag, complex);
+			i++;
+		}
+	}
+
+	return {
+		text,
+		rawText,
+		overrides: friendlyOverrides,
+		rawOverrides
+	}
+}
+
+/**
+ * Try and find an override for a specific override code in a subtitle's override string.
+ * @param overrides - an override string from a subtitle, may or may not contain this override
+ * @param overrideCode - an override code to search for
+ * @param isComplex - is the value complex? this is any override that accepts (arguments,like,this)
+ * @returns {{overrides: (void|string|*), params: []}|{overrides: (void|string|*), params: *}}
+ */
 function getOverride(overrides, overrideCode, isComplex=false) {
-	const overrideReg = new RegExp(
-		isComplex ?
-			`\\\\${overrideCode}\\((.*?)\\)` :
-			`\\\\${overrideCode}([^\\\\}]*)`
-		),
+	//complex overrides can have complex overrides within them, like a \clip within a \t
+	//so we can't just grab everything within the first sets of parenthesis we see, or
+	//we might cut off at the end of the nested override, need to be more careful
+	if (isComplex) {
+		const overrideMatch = overrides.match(`\\\\${overrideCode}\\((.*)`);
+		if (!overrideMatch) {
+			return;
+		}
+
+		let params = [],
+			//the full override text, to sanitize the remaining override string at the end
+			thisOverride = '',
+			//the current parameter we're walking through
+			thisParam = '',
+			//can you nest a complex in a complex in a complex? probably not, only assuming one level is probably fine
+			skippingComplex = false;
+
+		//the text starting at this override's params, until the end of the overrides string,
+		//we need to figure out how far to go until we hit the matching parenthesis, taking
+		//care not to match a nested complex tag
+		const paramsAndMore = overrideMatch[1];
+		for(let i = 0; i < paramsAndMore.length && overrides; i++) {
+			const thisCharacter = paramsAndMore[i];
+
+			function keep() {
+				thisParam += thisCharacter;
+				thisOverride += thisCharacter;
+			}
+			if (thisCharacter === '(') {
+				keep(); //this won't fall into the else, need to start the override's parameters
+				skippingComplex = true;
+			}
+			//end of a parameter, or the end of the string, need to store the param regardless, maybe we're done
+			else if (!skippingComplex && (thisCharacter === ',' || thisCharacter === ')')) {
+				params.push(thisParam);
+				thisOverride += thisCharacter;
+				thisParam = '';
+
+				if (thisCharacter === ')') {
+					return {
+						overrides: overrides.replace(`\\${overrideCode}(` + thisOverride, ''),
+						params
+					};
+				}
+			}
+			else if (skippingComplex && thisCharacter === ')') {
+				keep(); //this won't fall into the 'else', need to terminate the override
+				skippingComplex = false;
+			}
+			else {
+				keep();
+			}
+		}
+	}
+	const overrideReg = new RegExp(`\\\\${overrideCode}([^\\\\}]*)`),
 		overrideMatch = overrides.match(overrideReg);
 
 	if (!overrideMatch) {
@@ -119,18 +472,21 @@ function getOverride(overrides, overrideCode, isComplex=false) {
 	return {
 		//pass the overrides back that don't contain this override anymore
 		overrides: overrides.replace(overrideMatch[0], ''),
-		params: isComplex ? overrideMatch[1].split(',') : overrideMatch[1]
+		params: overrideMatch[1]
 	};
 }
 
 // export default class ASS extends SubtitleFormat {
-module.exports = class ASS extends SubtitleFormat {
+class ASS extends SubtitleFormat {
 	/**
 	 * @param ass - .ass file contents
+	 * @param fileName
 	 */
 	constructor(ass, fileName) {
 		super('ass', fileName);
-		//much easier to parse without carriage returns, keep in mind though that \r is also a 'reset' override tag
+		const start = Date.now();
+
+		//much easier to parse without carriage returns, keep in mind though that \\r is a 'reset' override tag
 		ass = ass.replace(/\r\n/g, '\n');
 		try {
 			this.blocks = this.parseBlocks(ass);
@@ -140,17 +496,33 @@ module.exports = class ASS extends SubtitleFormat {
 			this.parseStyles(this.parseBlock(this.blocks.styles));
 			this.parseSubOverrideTags();
 		} catch(e) {
-			console.error('ASS PARSE ERROR', e);
+			console.error('[Jimaku Player] ASS parse error', e);
+			if (this.parsingSub) {
+				console.error('[Jimaku Player] Error occurred parsing this line', this.parsingSub)
+			}
 			// if we errored out, having no subs is an error condition detected elsewhere
 			this.subs = [];
 		}
+
+		this.parseTime = Date.now() - start;
 	}
 
-	serialize() {
+	serialize(atTime) {
+		let subs = this.subs,
+			styles = this.styles;
+
+		if (typeof atTime === 'number') {
+			subs = this.getSubs(atTime);
+			styles = {};
+			//filter styles down to only what is used by the current subtitles
+			for (const {style} of subs) {
+				styles[style] = this.styles[style];
+			}
+		}
 		return JSON.stringify({
 			info: this.info,
-			styles: this.styles,
-			subs: this.subs,
+			styles,
+			subs,
 		}, null, 4);
 	}
 
@@ -164,29 +536,58 @@ module.exports = class ASS extends SubtitleFormat {
 		}];
 	}
 
+	/**
+	 * Parse the script metadata block, mostly just care about the PlayResX/PlayResY
+	 * values from this, which give insight to how big 1px is supposed to be relative
+	 * to the target video's resolution. (see 'scaleHeight' and 'scaleWidth').
+	 */
 	parseInfo() {
 		this.info = {};
 		this.blocks.info
 			.split('\n')
 			.forEach(line => {
-				const [key, value] = line.split(': ');
+				const [key, value] = line.split(/: ?/);
 				this.info[camelCase(key)] = value;
 			})
 	}
 
-	scaleHeight(height) {
-		//fonts in ASS files are meant to be equivalent to px, but they need to scale compared to the size of the video they were expecting,
-		//since we know expected video resolutions we can scale the subtitles into vh units so it'll automatically scale. this can also
-		//be used by pos override tags
-		return `${100 * (height / +this.info.playResY)}vh`;
-	}
-	scaleWidth(width) {
-		return `${100 * (width / +this.info.playResX)}vw`;
+	/**
+	 * Scale an Y coordinate (height or size) to viewport height based units depending
+	 * relative to the ASS script's target resolution.
+	 *
+	 * In an ASS script, sizes and positions are in pixels but those are relative to the
+	 * script resolution (the PlayResX/PlayResY values in the script info block). But if
+	 * those pixel values are treated at face value they will only be accurate if the video
+	 * size exactly matches those resolutions. To fix this we have to convert every size
+	 * into automatically scaling vh/vw units so no runtime scaling needs to be done.
+	 * If a video has a 1280x720 script resolution, a 50px value in a height
+	 * is 50/720th of the height of the video, in vh units that's 6.94vh and using that
+	 * will give whatever it's used for the same size or position relative to the video
+	 * no matter what the size of the video player is.
+	 * @param height - a value in the Y axis (height or position Y) from an ASS script
+	 * @param noUnit - return without units, used when math needs to be done at run-time
+	 * @returns {number|string}
+	 */
+	scaleHeight(height, noUnit=false) {
+		const scaledHeight = 100 * (height / +this.info.playResY);
+		return noUnit ? scaledHeight : `${scaledHeight}vh`;
 	}
 
 	/**
-	 * ASS subtitles have data in INI-like sections, under a header like [Events]
-	 * @param ass
+	 * Scale an X coordinate, same reasoning as 'scaleHeight'
+	 * @param width
+	 * @returns {number|string}
+	 */
+	scaleWidth(width) {
+		const scaledWidth = 100 * (width / +this.info.playResX)
+		return `${scaledWidth}vw`;
+	}
+
+	/**
+	 * ASS subtitles have data in INI-like sections, under a header like [Events],
+	 * this takes an ASS subtitle script and splits it into the important blocks
+	 * to be later parsed individually.
+	 * @param ass - the raw text contents of an .ass subtitle file
 	 */
 	parseBlocks(ass) {
 		//split the ass file by newlines followed by a [, we know those are the start of the headings
@@ -284,6 +685,7 @@ module.exports = class ASS extends SubtitleFormat {
 
 			// sometimes *Default === Default, just make anything here and in styles that use either just be "Default"
 			zipped.style = zipped.style === '*Default' ? 'Default' : zipped.style;
+			zipped._id = this.genId();
 			done.push(zipped);
 
 			return done;
@@ -291,6 +693,9 @@ module.exports = class ASS extends SubtitleFormat {
 	}
 	parseSubTimings() {
 		this.subs.forEach(sub => {
+			//keep original timings around for debugging
+			sub.rawStart = sub.start;
+			sub.rawEnd = sub.end;
 			sub.start = this.timeToMs(sub.start);
 			sub.end = this.timeToMs(sub.end);
 		})
@@ -324,7 +729,7 @@ module.exports = class ASS extends SubtitleFormat {
 
 			//these styles might always be defined, so maybe we don't need to safety check any of these
 			if (primaryColour) {
-				inlineStyle.push(`color: ${primaryColour}`);
+				inlineStyle.push(`color: ${primaryColour.rgba}`);
 			}
 			if (fontname) {
 				inlineStyle.push(genFontFamily(fontname));
@@ -334,7 +739,7 @@ module.exports = class ASS extends SubtitleFormat {
 				inlineStyle.push(genOutlineStyles(outlineColour, outline, backColour, shadow));
 			}
 			else if (borderStyle === '3') { //opaque box
-				inlineStyle.push(`background-color: ${backColour}`);
+				inlineStyle.push(`background-color: ${backColour.rgba}`);
 			}
 
 			if (bold === assTrue) {
@@ -346,16 +751,13 @@ module.exports = class ASS extends SubtitleFormat {
 			if (underline === assTrue || strikeOut === assTrue) {
 				inlineStyle.push(`text-decoration: ${underline === assTrue ? 'underline': ''} ${strikeOut === assTrue ? 'line-through' : ''}`);
 			}
-			inlineStyle.push(this.genScaledFont(fontsize));
 
 			parsedStyles[style.name] = {
 				inline: inlineStyle.join(';'),
-				verticalAlignment: genAlignment(
-					alignment,
-					this.scaleWidth(marginL),
-					this.scaleWidth(marginR),
-					this.scaleHeight(marginV),
-				),
+				marginL: this.scaleWidth(marginL),
+				marginR: this.scaleWidth(marginR),
+				marginV: this.scaleHeight(marginV),
+				fontSize: this.genScaledFont(fontsize),
 				//keep parsed styles as-is for debugging
 				raw: style
 			};
@@ -365,15 +767,20 @@ module.exports = class ASS extends SubtitleFormat {
 	}
 
 	genScaledFont(fontSize) {
-		return `font-size: ${this.scaleHeight(fontSize * 0.75)}`
+		//no exact science to the 0.7 here. it just seemed to be closer to the way
+		//the same subtitles looked in VLC. There could be something more to this
+		return this.scaleHeight(fontSize * 0.7, true);
 	}
 
 	parseSubOverrideTags() {
 		/**
 		 * Subtitles can have "overrides" which are like the inline-style of .ass subtitles. They apply to that
 		 * single line of subtitles, and are cumulative for the line unless they're reset or overridden by another
-		 * setting for the same
+		 * value of the same type of override tag.
 		 *
+		 * Because these overrides apply to subsections of the subtitle the parsing and styling is done in two stages,
+		 * first the overall subtitle (a "Dialogue" line in the ASS file) called "sub" here, and each chunk of text and
+		 * its styling between override tags within the sub called "phrases" here.
 		 *
 		 * Assume we've got the following subtitles:
 		 * {\b1}いいよ。{\i1}というかなんで
@@ -383,14 +790,25 @@ module.exports = class ASS extends SubtitleFormat {
 		 * only the second one. So all styles need to be able to add or remove styles
 		 */
 		this.subs.forEach(sub => {
+		    //copy the subtitle we're parsing overrides for, this lets us log the line that caused parsing to fail
+			this.parsingSub = JSON.parse(JSON.stringify(sub));
+
 			//keep the unchanged text around for debugging purposes
 			sub.rawText = sub.text;
 
 			sub.text = sub.text
+				//\n is a soft line break where the subtitle renderer can choose if it needs a line break here,
+				//essentially a <wbr> but it's easier to ignore that for now and treat it as a space
+				.replace(/\\n/g, ' ')
 				//these characters need to be double escaped
 				.replace(/\\N/g, '\n') //hard new line
+				//non "hard spaces" on the ends of the text are supposed to be ignored
+				.trim()
 				//subtitles are rendered with `white-space:pre` so just using a space character for a hard space should be enough
 				.replace(/\\h/g, ' '); //hard space
+
+			const inheritedStyle = this.styles[sub.style];
+			sub.mountPoint = inheritedStyle.raw.alignment;
 
 			//just ignore lines with no overrides
 			if (!/{.+?}/.test(sub.text)) {
@@ -407,221 +825,212 @@ module.exports = class ASS extends SubtitleFormat {
 			//we've parsed so far.
 			let cumulativeStyles = [];
 			//go block by block of overridden text
-			for (const text of scanner) {
+			for (const scanned of scanner) {
 				const containerInline = [],
-					styled = {
-						text: removeOverrideText(text),
+					phrase = {
+						_id: this.genId(),
+						text: scanned.text,
 						fadeIn: 0,
 						fadeOut: 0,
-						inline: ''
-					};
-
-				let overridesMatch = text.match(/{.*?}/),
-					overrides = overridesMatch ? overridesMatch[0] : '';
-
-				function checkOverride(code, isComplex=false, fn=()=>{}) {
-					const results = getOverride(overrides, code, isComplex);
-					if (results) {
-						fn(results.params);
-						overrides = results.overrides;
-					}
-				}
-
-				/**
-				 * Check multiple override codes at once, for things that depend all on the same CSS property
-				 * @param codes - array of override tags
-				 * @param isComplex - boolean (or array of booleans matching each code) determining if the override
-				 * tag is complex (has multiple comma separated arguments in parenthesis)
-				 * @param fn
-				 */
-				function checkMultipleOverrides(codes, isComplex, fn) {
-					const overrideResults = codes.map((code, index) => {
-						const complex = Array.isArray(isComplex) ? isComplex[index] : isComplex;
-
-						const results = getOverride(overrides, code, complex);
-						if (results) {
-							overrides = results.overrides;
-							return results.params;
-						}
-					});
-
-					if (overrideResults.some(r => r !== undefined)) {
-						fn(...overrideResults);
-					}
-				}
+						inline: '',
+						overrides: scanned.overrides,
+						rawOverrides: scanned.rawOverrides,
+						rawText: scanned.rawText,
+						//generated SVG structure for drawings and clip paths
+						html: ''
+					},
+					{overrides} = scanned;
 
 				//todo - parse more tags
 				//http://docs.aegisub.org/3.2/ASS_Tags/
 
-				//not actually handling these yet, but they can interfere with other
-				//overrides, so pretend to process them so they're not in the override string
-				checkOverride('fscx');
-				checkOverride('fscy');
-
-				checkOverride('an', false, alignmentCode => {
-					const srcStyle = this.styles[sub.style];
-					sub.verticalAlignment = genAlignment(
-						alignmentCode,
-						this.scaleWidth(srcStyle.raw.marginL),
-						this.scaleWidth(srcStyle.raw.marginR),
-						this.scaleHeight(srcStyle.raw.marginV),
-					)
-				});
-
-
 				//outline and shadow use a bunch of text-shadows, so they need to all be parsed at once, and their result computed
-				let outlineColor,
-					shadowColor,
-					outlineSize,
-					shadowDepth,
-					blur;
-				checkOverride('3c', false, color => {
-					outlineColor = color;
-				});
-				checkOverride('4c', false, color => {
-					shadowColor = color;
-				});
-				checkOverride('bord', false, size => {
-					outlineSize = size;
-				});
-				checkOverride('shad', false, depth => {
-					shadowDepth = depth;
-				});
-				checkOverride('blur', false, b => {
-					blur = b;
-				});
-				checkOverride('be', false, be => {
-					blur = be;
-				});
 				//if any of them are defined, merge them in with the applied style's definitions, then generate an outline/shadow style
-				if ([outlineColor, shadowColor, outlineSize, shadowDepth, blur].some(p => typeof p !== "undefined")) {
-					const baseStyle = this.styles[sub.style],
-						useOrFallback = (value, fallbackProp) => typeof value !== "undefined" ? value : baseStyle.raw[fallbackProp];
+				if (overrides.outlineColor || overrides.shadowColor || overrides.outlineSize || overrides.shadowDepth || overrides.blur ) {
+					const baseStyle = this.styles[sub.style];
+
 					// just in case there's no style applied? unsure if that's possible, but checking just in case
 					if (baseStyle) {
-						outlineColor = useOrFallback(parseColor(outlineColor), 'outlineColour');
-						shadowColor = useOrFallback(parseColor(shadowColor), 'backColour');
-						outlineSize = useOrFallback(outlineSize, 'outline');
-						shadowDepth = useOrFallback(shadowDepth, 'shadow');
+						//styles on the base style are using the 'ou' spelling of color etc
+						const outlineColor = overrides.outlineColor || baseStyle.raw.outlineColour,
+							shadowColor = overrides.shadowColor || baseStyle.raw.backColour,
+							outlineSize = overrides.outlineSize || baseStyle.raw.outline,
+							shadowDepth = overrides.shadowDepth || baseStyle.raw.shadow;
+
 						//not using a blur fallback, because blur is only ever defined in an override it seems
-						cumulativeStyles.push(genOutlineStyles(outlineColor, outlineSize, shadowColor, shadowDepth, blur));
+						cumulativeStyles.push(genOutlineStyles(outlineColor, outlineSize, shadowColor, shadowDepth, overrides.blur));
 					}
 				}
 
-				checkMultipleOverrides(['pos', 'an', 'org'], [true, false, true], (pos, an='5', org) => {
-					if (pos) {
-						const [x, y] = pos;
+				let transforms = [];
+				if (overrides.position || overrides.movement) {
+					sub.mountPoint = 'positioned';
+
+					if (overrides.position) {
+						const [x, y] = overrides.position;
 						//positioning applies to the line, and if we just put it on this span it might get put in the right space, but the
 						//containing paragraph elements will stack, possibly overlapping the video controls if
 						containerInline.push(`position: fixed; left: ${this.scaleWidth(x)}; top: ${this.scaleHeight(y)}`);
-
-						//CSS positioning moves as if it's \an7
-						//but by .ass positionings seem to work like \an5,
-						//so we need to first reconcile the difference in movement by adding
-						//an extra -50%, -50%, so that's why these numbers look weird, without
-						//that adjustment all positioned subtitles are too far down and right
-						const origin = {
-							'1': '50%, -150%',
-							'2': '-50%, -150%',
-							'3': '-150%, -150%',
-							'4': '50%, -50%',
-							'5': '-50%, -50%',
-							'6': '-150%, -50%',
-							'7': '50%, 50%',
-							'8': '-50%, 50%',
-							'9': '-150%, 50%'
-						}[an];
-						containerInline.push(`transform: translate(${origin})`);
-
-						if (org) {
-							const [orgX, orgY] = org;
-							cumulativeStyles.push(`transform-origin: ${this.scaleWidth(orgX)} ${this.scaleHeight(orgY)}`);
+					}
+					else if (overrides.movement) {
+						const [x1, y1, x2, y2, ...timings] = overrides.movement;
+						sub.movement = {
+							x1: this.scaleWidth(x1),
+							y1: this.scaleHeight(y1),
+							x2: this.scaleWidth(x2),
+							y2: this.scaleHeight(y2),
+							//setting both times to zero in ASS movement is equivalent to not having timings at all
+							timings: timings.every(t => t === 0) ? [] : timings
 						}
 					}
-					else if (an) {
 
+					//if the text is explicitly positioned we don't want any unwanted wrapping, it's probably something
+					//pretty short that's probably exactly where it needs to be, letting it wrap when it shouldn't might not be good
+					containerInline.push('white-space: pre');
+
+					//CSS positioning moves as if it's \an7 (i.e. positioning sets the top left corner's position)
+					//but by .ass positionings seem to work like \an5, (i.e. positioning sets the center's position)
+					//so we need to first reconcile the difference in movement by adding
+					//an extra -50%, -50%, so that's why these numbers look weird, without
+					//that adjustment all positioned subtitles are too far down and right
+					const origin = {
+						'1': '0, -100%',
+						'2': '-50%, -100%',
+						'3': '-100%, -100%',
+						'4': '0, -50%',
+						'5': '-50%, -50%',
+						'6': '-100%, -50%',
+						'7': '0, 0',
+						'8': '-50%, 0',
+						'9': '-100%, 0'
+					}[overrides.alignment || inheritedStyle.raw.alignment];
+					containerInline.push(`transform: translate(${origin})`);
+
+					if (overrides.origin) {
+						const [orgX, orgY] = overrides.origin;
+						cumulativeStyles.push(`transform-origin: ${this.scaleWidth(orgX)} ${this.scaleHeight(orgY)}`);
 					}
-				});
+				}
+				else if (overrides.alignment) {
+					sub.mountPoint = overrides.alignment
+				}
 
-				checkMultipleOverrides(['frx', 'fry', 'frz'], false, (xRot, yRot, zRot) => {
-					const rotations = [];
-					const checkRotate = (deg, axies, multiplier=1) => {
-						if (deg !== undefined) {
-							deg = parseFloat(deg) * multiplier;
-							return rotations.push(`rotate3d(${axies.join(', ')}, ${deg}deg)`);
-						}
-					};
+				const {fontScaleX, fontScaleY} = overrides;
+				if (fontScaleX) {
+					transforms.push(`scaleX(${fontScaleX}%)`);
+				}
+				if (fontScaleY) {
+					transforms.push(`scaleY(${fontScaleY}%)`);
+				}
 
-					//the direction of rotation seems to be different for the y/z axis compared to css transforms
-					checkRotate(xRot, [1, 0, 0]);
-					checkRotate(zRot, [0, 0, 1], -1);
-					checkRotate(yRot, [0, 1, 0]);
-
-					if (rotations.length) {
-						containerInline.push(`perspective: 200px`);
-						//can't rotate while it's display: inline;
-						cumulativeStyles.push(`display: block; transform: ${rotations.join(' ')}`);
+				const rotations = [];
+				const checkRotate = (deg, rotationTransform, multiplier=1) => {
+					if (deg !== undefined) {
+						deg = parseFloat(deg) * multiplier;
+						return rotations.push(`${rotationTransform}(${deg}deg)`);
 					}
-				});
+				};
 
+				checkRotate(overrides.rotateY, `rotateY`);
+				checkRotate(overrides.rotateX, `rotateX`);
+				//the direction of rotation seems to be different for the y/z axis compared to css transforms
+				checkRotate(overrides.rotateZ, `rotateZ`, -1);
 
-				checkOverride('fad', true, ([fadeIn, fadeOut]) => {
-					styled.fadeIn = parseInt(fadeIn, 10);
-					styled.fadeOut = parseInt(fadeOut, 10);
+				if (rotations.length) {
+					transforms.push(`perspective(200px)`);
+					transforms.push(rotations.join(' '));
+				}
+
+				if (transforms.length) {
+					//without if text is inline it won't rotate or scale, using position: absolute also
+					//seems to allow the transforms to work, but then the positioning gets messed up
+					cumulativeStyles.push(`display: inline-block`);
+					cumulativeStyles.push(`transform: ${transforms.join(' ')}`);
+				}
+
+				if (overrides.fade) {
+					phrase.fadeIn = overrides.fade[0];
+					phrase.fadeOut = overrides.fade[1];
+
 					//svelte will not start animating until the sub is done showing and not before,
 					//so we need to subtract the amount of fadeout time from the subtitle's end time so it works
-					sub.end -= fadeOut;
-				});
+					sub.end -= phrase.fadeOut;
+				}
 
-				checkOverride('fsp', false, spacing => {
-					cumulativeStyles.push(`letter-spacing: ${spacing}px`)
-				});
+				if (overrides.letterSpacing) {
+					cumulativeStyles.push(`letter-spacing: ${overrides.letterSpacing}px`);
+				}
 
-				checkOverride('fs', false, fontSize => {
-					cumulativeStyles.push(this.genScaledFont(fontSize));
-				});
+				if (overrides.fontSize) {
+					phrase.fontSize = this.genScaledFont(overrides.fontSize);
+				}
 
 				//need to handle underline and strike through decorations at the same time, because it's the same css property
+				//TODO these need to not disable inherited underline/strikethrough, if neither exist we just set to `none` now
 				const textDecorationOptions = [];
-				checkOverride('u', false, underlined => {
+				if (overrides.underline) {
 					textDecorationOptions.push('underline');
-				});
-				checkOverride('s', false, striked => {
+				}
+				if (overrides.strikethrough) {
 					textDecorationOptions.push('line-through');
-				});
-				cumulativeStyles.push(`text-decoration: ${textDecorationOptions.length ? textDecorationOptions.join(' ') : 'none'}`);
+				}
+				if (textDecorationOptions.length) {
+					cumulativeStyles.push(`text-decoration: ${textDecorationOptions.length ? textDecorationOptions.join(' ') : 'none'}`);
+				}
 
-				checkOverride('b', false, bolded => {
-					cumulativeStyles.push(`font-weight: ${bolded ? 'bold' : 'normal'}`);
-				});
+				const {bold, italic} = overrides;
+				if (bold !== undefined) {
+					const boldSettings = {
+						[bold]: bold,
+						1: 'bold',
+						0: 'normal',
+					};
+					cumulativeStyles.push(`font-weight: ${boldSettings[bold]}`);
+				}
 
-				checkOverride('i', false, italic => {
-					cumulativeStyles.push(`font-style: ${italic ? 'italic' : 'normal'}`);
-				});
+				if (typeof italic === 'number') {
+					cumulativeStyles.push(`font-style: ${!!italic ? 'italic' : 'normal'}`);
+				}
 
-				checkOverride('fn', false, fn => {
-					cumulativeStyles.push(genFontFamily(fn));
-				});
+				if (overrides.fontName) {
+					cumulativeStyles.push(genFontFamily(overrides.fontName));
+				}
 
 				//colors
-				checkOverride('1c', false, color => {
-					cumulativeStyles.push(`color: ${parseColor(color)}`)
-				});
+				if (overrides.color) {
+					cumulativeStyles.push(`color: ${overrides.color.rgba}`)
+				}
 
-				checkOverride('r', false, style => {
-					if (style) {
-						const srcStyle = this.styles[style];
-						cumulativeStyles = [srcStyle.inline];
+				if (overrides.reset) {
+					const srcStyle = this.styles[overrides.reset];
+					cumulativeStyles = [srcStyle.inline];
+				}
+				//if we're not switching to another style, just blank out the styles
+				else if (overrides.reset === false) {
+					cumulativeStyles = [];
+				}
+
+				if (overrides.drawMode === '1') {
+					const drawing = this.draw(phrase.text, overrides, inheritedStyle)
+					phrase.html += drawing.html;
+					phrase.drawCommands = drawing.commands;
+					phrase.text = '';
+					//SVGs don't have anything you can define, and searching jisho for a path is just going to be nonsense
+					containerInline.push('pointer-events: none');
+
+					if (overrides.blur) {
+						cumulativeStyles.push(`filter: blur(${overrides.blur}px)`);
 					}
-					//if we're not switching to another style, just blank out the styles
-					else {
-						cumulativeStyles = [];
-					}
-				});
+				}
 
+				if (overrides.clip) {
+					const {html, clipId} = this.clip(overrides.clip, phrase._id);
+					cumulativeStyles.push(`clip-path: url(#${clipId})`)
+					phrase.html += html;
+				}
 
-				styled.inline = cumulativeStyles.join(';');
-				sub.phrases.push(styled);
+				phrase.inline = cumulativeStyles.join(';');
+				sub.phrases.push(phrase);
 				if (containerInline.length) {
 					sub.inline = containerInline.join(';');
 				}
@@ -631,5 +1040,72 @@ module.exports = class ASS extends SubtitleFormat {
 			//have to be handled wherever we're not showing styled text (alignment button and jisho searches)
 			sub.text = removeOverrideText(sub.text);
 		});
+
+		this.parsingSub = null;
 	}
-};
+
+	genSvg(commands, scale=1) {
+		const svgElement = createSVG(),
+			pathElement = createSVGNSElement('path');
+
+		const {
+			path,
+			maxHeight,
+			maxWidth,
+			viewBox
+		} = genPathFromDrawCommands(commands);
+
+		svgElement.setAttribute('viewBox', viewBox);
+		pathElement.setAttribute('d', path);
+		svgElement.setAttribute('width', this.scaleWidth(maxWidth))
+		svgElement.setAttribute('height', this.scaleHeight(maxHeight))
+
+		//not actually appending the two together, as both usages of these have different
+		//structure depending on drawing vs clip shape
+		return {
+			svg: svgElement,
+			path: pathElement
+		}
+	}
+
+	clip({scale, commands}, phraseId) {
+		const {svg, path} = this.genSvg(commands, scale),
+			defs = createSVGNSElement('defs'),
+			clipPath = createSVGNSElement('clipPath'),
+			clipId = `clip-path-${phraseId}`;
+
+		clipPath.setAttribute('id', clipId);
+
+		svg.appendChild(defs);
+		defs.appendChild(clipPath);
+		clipPath.appendChild(path);
+
+		return {
+			html: svg.outerHTML,
+			clipId,
+			commands
+		}
+	}
+
+	draw(drawText, overrides, inheritedStyle) {
+		const commands = parseDrawingCommands(drawText),
+			{svg, path} = this.genSvg(commands);
+
+		function overrideOrInherit(overrideColor, inheritedColor) {
+			return overrideColor ? overrideColor.rgba : inheritedColor.rgba;
+		}
+
+		path.setAttribute('fill', overrideOrInherit(overrides.color, inheritedStyle.raw.primaryColour));
+		svg.appendChild(path);
+
+		return {
+			html: svg.outerHTML,
+			commands
+		};
+	}
+}
+
+module.exports = {
+	getOverride,
+	ASS
+}

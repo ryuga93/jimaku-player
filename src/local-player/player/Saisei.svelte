@@ -25,10 +25,9 @@
         margin: 0 auto;
 		cursor: default;
 		text-transform: uppercase;
+		user-select: none;
 	}
 	.video-controls {
-		display: flex;
-		flex-direction: row;
 		background: rgba(28, 24, 37, 0.79);
 		position: absolute;
 		bottom: 0;
@@ -39,119 +38,105 @@
 	}
     .times {
 		padding: 0.3rem;
-		line-height: 2.5rem;
-		cursor: default;
-	}
-	.video-controls input[type=range] {
-		flex: 1;
+        user-select: none;
 	}
     button {
-		color: white;
-		background: none;
-		border: none;
-		padding: 0 0.6rem;
-		line-height: 1.5;
         cursor: pointer;
 		font-size: 2rem;
 		width: 5rem;
+		color: white;
+		flex: 0;
+        margin: 0;
+        padding: 0.5rem;
 	}
-    button:active {
-		border: none;
-	}
-	button:focus {
-		box-shadow: -1px -1px var(--accent-color), 1px -1px var(--accent-color);
-	}
-	button::-moz-focus-inner {
-		border: 0;
-	}
-	button:hover {
-		background: #344062;
-		color: var(--accent-color);
-	}
-
-	input[type=range] {
-		-webkit-appearance: none;
-		background: none !important;
-		width: 100%;
-	}
-	::-moz-range-track {
-		background-color: #252732;
-        height: 0.4rem;
-	}
-
-	::-moz-range-progress {
-		background: var(--accent-gradient) fixed;
-		height: 0.4rem;
-	}
-
-	::-moz-range-thumb {
-		-webkit-appearance: none;
-		cursor: pointer;
-		height: 0.75rem;
-		width: 0.75rem;
-		background: var(--accent-gradient) fixed;
-		border-radius: 50%;
-		border: none;
-		margin-top: -0.875rem;
-        visibility: hidden;
-	}
-
-	/* chrome doesn't seem to play nicely with comma separated selectors, can't combine with the firefox ones */
-	::-webkit-slider-runnable-track {
-		background-color: #4b5266;
-		height: 0.2rem;
-	}
-
-	::-webkit-slider-thumb {
-		-webkit-appearance: none;
-		cursor: pointer;
-		height: 0.75rem;
-		width: 0.75rem;
-		background: var(--accent-gradient) fixed;
-		border-radius: 50%;
-		border: none;
-		margin-top: -0.25rem;
+	.video-player :global(i) {
+		font-size: 1.5rem;
 	}
 </style>
 
 <div class="video-player" class:no-cursor={!showControls && !paused}>
-	<video src={src} bind:currentTime={currentTime} bind:duration={totalTime} bind:paused={paused} on:click={togglePause} bind:this={videoElement}></video>
+	<!-- svelte-ignore a11y-media-has-caption -->
+	<video
+		src={streamer.src}
+		bind:currentTime={currentTime}
+		bind:duration={totalTime}
+		bind:paused={paused}
+		on:click={togglePause}
+		on:error={videoError}
+		bind:this={videoElement}
+	></video>
 	{#if paused}
 		<div class="pause-alert-container" on:click={togglePause}>
 			<p class="pause-alert">
-				{#if src}
-                    Paused
-				{:else}
-					Select a video
-				{/if}
+				Paused
 			</p>
 		</div>
 	{/if}
 	{#if showControls || paused}
-		<div class="video-controls" transition:fade={{duration: 100}}>
-			<button on:click={togglePause}><Icon name={!paused ? 'pause' : 'play'} /></button>
+		<div class="video-controls f-row align-items-center" transition:fade={{duration: 100}}>
+			<button on:click={togglePause}><Icon icon={!paused ? 'pause' : 'play'} noPadding={true} /></button>
 			<span class="times">
 				{prettyTime(currentTime, totalTime > 3600)} / {prettyTime(totalTime)}
 			</span>
-			<input type="range" bind:value={currentTime} max={totalTime} />
-			<button on:click={toggleFullscreen}><Icon name="maximize-2" /></button>
+			<SaiseiSeek
+				value={currentTime}
+				max={totalTime}
+				on:seek={onSeeked}
+				on:seek-drag-start={onSeekStart}
+				label="video seek slider"
+			/>
+			<button on:click={() => showSettings = !showSettings} on:contextmenu|preventDefault={() => showDebug = true}>
+				<Icon icon="cog" noPadding={true} />
+				<span class="sr-only">Video settings</span>
+			</button>
+			<button on:click={toggleFullscreen}>
+				<Icon icon="expand" noPadding={true} />
+				<span class="sr-only">Toggle fullscreen</span>
+			</button>
 		</div>
 	{/if}
 </div>
 
-<svelte:window on:keydown={handleHotkeys} on:mousemove={active}/>
+{#if showSettings}
+	<Modal bind:visible={showSettings} title="Video Settings">
+		<SaiseiSettings on:switchTrack={switchTrack} audioTracks={metadata.audio} {selectedAudioTrackIndex} />
+	</Modal>
+{/if}
+{#if showDebug}
+	<Modal bind:visible={showDebug} title="Saisei Debug">
+		<SaiseiDebug {metadata} />
+	</Modal>
+{/if}
+
+<svelte:window on:keydown={handleHotkeys} on:mousemove={active} />
+<svelte:body on:mouseleave={inactive} />
 
 <script>
 	import {fade} from 'svelte/transition';
-	import Icon from "../Icon.svelte";
+	import {onMount, tick} from 'svelte';
+	import {Icon, Modal} from 'sheodox-ui';
+	import SaiseiSettings from "./SaiseiSettings.svelte";
+	import viewTimes from "../view-times";
+	import {Streamer} from './Streamer';
+	import {isEnoughBuffered, isTimeBuffered, prettyTime} from "../utils";
+	import {Logger, logLevels} from '../logger';
+	import SaiseiSeek from "./SaiseiSeek.svelte";
+	import SaiseiDebug from "./SaiseiDebug.svelte";
 
-	export let src = '';
+	export let metadata;
+	export let resourceBase;
+
 	//the amount of time to wait before fading out the video controls
-	const inactivityTimeout = 3000;
+	const inactivityTimeout = 3000,
+		streamer = new Streamer(metadata, resourceBase),
+		logger = new Logger('Saisei');
 	let currentTime = 0,
-			totalTime = 0,
-			paused = true,
-			showControls = true;
+		showDebug = false,
+		showSettings = false,
+		totalTime = 0,
+		paused = true,
+		showControls = true,
+		selectedAudioTrackIndex = streamer.getSelectedAudioTrackIndex();
 
 	let inactiveTimer, videoElement;
 
@@ -164,31 +149,43 @@
 		}, inactivityTimeout);
 	}
 
-	/**
-	 * Change a number in seconds to mm:ss or hh:mm:ss
-	 * @param seconds - number of seconds, not ms because video elements deal in seconds
-	 * @param forcePadHours - if we should pad 00 for hours regardless of if the time is over an hour,
-	 * if the duration of the video is over an hour the width of the times displayed will change once
-	 * it surpasses that hour mark, causing the range element to change width, which could cause issues
-	 * with seeking.
-	 * @returns {string}
-	 */
-	function prettyTime(seconds, forcePadHours=false) {
-		const hoursRemainder = seconds % 3600,
-				hours = Math.floor((seconds / 3600)),
-				minutesRemainder = hoursRemainder % 60,
-				minutes = Math.floor(hoursRemainder / 60);
-		const pad = num => num.toFixed(0).padStart(2, '0');
-		return (hours > 0 || forcePadHours ? [hours, minutes, minutesRemainder] : [minutes, minutesRemainder])
-				.map(pad).join(':');
+	// can be used to immediately consider the user inactive (mouse leave from the player)
+	function inactive() {
+		clearTimeout(inactiveTimer);
+		showControls = false;
+	}
+
+	async function switchTrack(e) {
+		selectedAudioTrackIndex = e.detail;
+		streamer.switchAudioTrack(selectedAudioTrackIndex, currentTime);
 	}
 
 	function togglePause() {
-		//don't let the video play if there's no video to play
-		if (src) {
-			paused = !paused;
-			active();
+		paused = !paused;
+		active();
+	}
+
+	//track the state of paused when seeking starts,
+	let wasPaused = null;
+	function onSeekStart(e) {
+		wasPaused = paused;
+		//pause the video, or the slider will be jumping back and forth between
+		//the intermediate values the user is dragging the thumb to, and the
+		//actual values the video is playing, we'll resume the video (if it was
+		//playing) when they finish seeking
+		if (!paused) {
+			paused = true;
 		}
+	}
+
+	function onSeeked(e) {
+		videoElement.currentTime = e.detail;
+		// only care about unpausing the video if we programmatically paused it in the first place
+		if (wasPaused !== null) {
+			paused = wasPaused;
+		}
+		wasPaused = null;
+		bufferVideo(e.detail);
 	}
 
 	function toggleFullscreen() {
@@ -202,7 +199,7 @@
 	function handleHotkeys(e) {
 		let caught = true;
 		const smallTimeAdjustment = 5,
-				largeTimeAdjustment = 15;
+			largeTimeAdjustment = 15;
 
 		switch (e.key) {
 			case 'f':
@@ -234,4 +231,61 @@
 		}
 		active();
 	}
+
+	/*
+	This interval ensures we have a decent amount of video and audio buffered so the video can play
+	without interruptions. This could be in a reactive ("$: ...") statement, but that causes a crazy
+	amount of unwanted segment fetches to happen if the user is dragging the seek bar. An interval
+	like this will still always allow it to keep the buffer healthy before it would cause stalling.
+	 */
+	setInterval(() => {
+		//this will run before the video initializes, without this it will always throw an error
+		if (videoElement) {
+			bufferVideo(currentTime);
+		}
+	}, 1000);
+
+	function isVideoBuffered(seconds) {
+		if (!videoElement) {
+			return;
+		}
+
+		return isTimeBuffered(seconds, videoElement.buffered);
+	}
+
+	async function bufferVideo(time) {
+		const bufferingHappened = await streamer.bufferTime(time);
+
+		if (bufferingHappened && logLevels.streaming && videoElement) {
+			const bufferedTime = [];
+			for (let i = 0; i < videoElement.buffered.length; i++) {
+				const start = videoElement.buffered.start(i),
+					end = videoElement.buffered.end(i);
+				bufferedTime.push(`${prettyTime(start)}-${prettyTime(end)}`);
+			}
+			logger.streaming(`Buffered segments: ${bufferedTime.join(', ')}`)
+			if (!isVideoBuffered(time)) {
+				logger.streaming(`Attempted to buffer video for ${prettyTime(time)} but it is NOT buffered!`);
+			}
+		}
+	}
+
+	function videoError(...args) {
+		logger.error(...args);
+	}
+
+	onMount(() => {
+		// the full path to this video
+		const videoIdentifier = resourceBase + '/' + metadata.title;
+
+		currentTime = viewTimes.get(videoIdentifier).currentTime;
+		bufferVideo(currentTime);
+
+		setInterval(() => {
+			const video = document.querySelector('video');
+			if (video) {
+				viewTimes.set(videoIdentifier, video.currentTime, video.duration)
+			}
+		}, 50);
+	})
 </script>
