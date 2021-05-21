@@ -6,7 +6,9 @@ module.exports = {
 	entry: {
 		subtitler: './src/subtitler/main.js',
 		host: './src/local-player/host/host.js',
-		player: './src/local-player/player/player.js'
+		player: './src/local-player/player/player.js',
+		'subrip-test': './src/test/subrip/subrip-test.js',
+		'subrip-test-player': './src/test/subrip/test-player.js'
 	},
 	output: {
 		filename: '[name].js',
@@ -23,7 +25,6 @@ module.exports = {
 		rules: [
 			{
 				test: /\.(html|svelte)$/,
-				exclude: /node_modules/,
 				use: 'svelte-loader'
 			},
 			{
@@ -31,5 +32,8 @@ module.exports = {
 				use: ['style-loader', 'css-loader', 'sass-loader']
 			}
 		]
+	},
+	optimization: {
+		usedExports: true
 	}
 };

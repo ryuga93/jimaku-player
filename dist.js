@@ -3,7 +3,7 @@ const fs = require('fs'),
 	lastPackagedScript = fs.readFileSync(packagedScriptPath).toString(),
 	script = fs.readFileSync(`./static/subtitler.js`).toString();
 
-let versionBase = '0.1.';
+let versionBase = '0.5.';
 const [_, oldVersion] = lastPackagedScript.match(/@version\s*\d+\.\d+\.(\d+)/);
 
 //if packaging a release version, increment the version
@@ -25,11 +25,8 @@ const userscript = `// ==UserScript==
 // @match        https://mega.nz/*
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_addStyle
+// @grant        GM_setClipboard
 // ==/UserScript==
-
-GM_addStyle('.viewer-image-bl {width: 100%;height: 100%;font-size: initial!important;line-height: initial!important;margin: auto;}');
-GM_addStyle('input[type="checkbox"] {opacity: initial!important;}');
 
 ${script}
 `;
