@@ -109,7 +109,19 @@
         </div>
     {/if}
 {/if}
-
+<div class="row">
+    <label>
+        Line Height of Subtitle to prevent overlapping: ({Math.floor($subtitleLineHeight * 10)}px)
+        <br>
+        <input
+            type="range"
+            min="0.5"
+            max="10"
+            step="0.1"
+            bind:value={$subtitleLineHeight}
+        />
+    </label>
+</div>
 <h3>
     About
 </h3>
@@ -153,7 +165,8 @@
         invertVerticalAlignment,
         globalFontScale,
         subtitleClickAction,
-        autoCopySubtitles
+        autoCopySubtitles,
+        subtitleLineHeight
     } from '../settingsStore';
     import {
         usesShowBasedSettings,

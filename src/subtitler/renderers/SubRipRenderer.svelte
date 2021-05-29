@@ -7,7 +7,6 @@
 		white-space: pre-line;
 		text-align: center;
 		max-width: 100vw;
-		line-height: 40px;
 		font-family: "Source Han Sans", "源ノ角ゴシック", "Hiragino Sans", "HiraKakuProN-W3", "Hiragino Kaku Gothic ProN W3", "Hiragino Kaku Gothic ProN", "ヒラギノ角ゴ ProN W3", "Noto Sans", "Noto Sans CJK JP", "メイリオ", Meiryo, "游ゴシック", YuGothic, "ＭＳ Ｐゴシック", "MS PGothic", "ＭＳ ゴシック", "MS Gothic", sans-serif;
 		display: block;
         transition: top 0.1s;
@@ -48,6 +47,7 @@
 		showSubtitlesOnVideo,
 		subtitleFallbackColor,
 		invertVerticalAlignment,
+		subtitleLineHeight,
 	} from '../settingsStore';
     import {performSubtitleClickAction} from "./render-common";
 	import {userActive} from "../activity-stores";
@@ -57,7 +57,8 @@
 	function genBaseStyles(sub, userActive) {
 		let appliedStyles = [
 			`color: ${$subtitleFallbackColor}`,
-            `font-size: ${5 * $fontScale}vh`
+            `font-size: ${5 * $fontScale}vh`,
+            `line-height: ${10 * $subtitleLineHeight}px`
 		];
 
 		if (sub.verticalAlignment) {
