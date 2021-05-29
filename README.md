@@ -5,7 +5,8 @@ This is a fork of  [字幕プレーヤー](https://github.com/sheodox/jimaku-pla
 ## [Install Fork Version (requires Tampermonkey)](https://github.com/ryuga93/jimaku-player-mega/raw/master/dist/jimaku-player.user.js)
 
 ## Added feature
-Allows subtitles to be loaded into Mega's video player.
+* Allows subtitles to be loaded into Mega's video player.
+* Line Height setting to prevent subtitle from overlapping
 
 # <img src="https://raw.githubusercontent.com/sheodox/jimaku-player/master/static/logo.svg?sanitize=true" width="160" height="160" alt="logo"> 字幕プレーヤー
 
