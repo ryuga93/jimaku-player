@@ -70,7 +70,7 @@
 <script>
 	import {fade} from 'svelte/transition';
 	import {performSubtitleClickAction} from "./render-common";
-	import {subtitleFallbackColor} from '../settingsStore';
+	import {subtitleFallbackColor, subtitleLineHeight} from '../settingsStore';
 	import {
 		joinStyles,
 		fontScale,
@@ -101,7 +101,8 @@
 
 	function genBaseStyles(sub) {
 		let appliedStyles = [
-			`color: ${$subtitleFallbackColor}`
+			`color: ${$subtitleFallbackColor}`,
+			`line-height: ${10 * $subtitleLineHeight}px`
 		];
 
 		//ASS subtitles inherit their base styles from some style declarations
